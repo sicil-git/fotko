@@ -1,0 +1,153 @@
+export async function onRequestGet(context) {
+  const { request, env } = context;
+  const cookieHeader = request.headers.get('Cookie') || '';
+  
+  // Analizza i cookie esistenti per recuperare sessionToken e userid
+  const cookies = parseCookies(cookieHeader);
+  let sessionToken = cookies.sessionToken;
+  let userId = cookies.userId;
+
+  let shouldSetCookies = false;
+
+  // Gestione delle richieste preflight (OPTIONS)
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: getCorsHeaders(request)
+    });
+  }
+
+  // Se è una richiesta GET (o altro metodo supportato)
+  if (request.method !== 'GET') {
+    return new Response(JSON.stringify({ error: 'Metodo non consentito' }), {
+      status: 405,
+      headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json' }
+    });
+  }
+
+  // Se mancano le credenziali nei cookie, effettua l'autenticazione su LibreBooking
+  if (!sessionToken || !userId) {
+    try {
+      const authUrl = env.LIBREBOOKING_URL_AUTHENTICATE || 'https://booked.sicil.eu/Web/Services/index.php/Authentication/Authenticate';
+      
+      // Lettura delle credenziali dalle variabili d'ambiente
+      const username = env.LIBREBOOKING_USERNAME;
+      const password = env.LIBREBOOKING_PASSWORD;
+
+      if (!username || !password) {
+        return new Response(JSON.stringify({ error: 'Credenziali non configurate nelle variabili d\'ambiente' }), {
+          status: 500,
+          headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json' }
+        });
+      }
+
+      const authResponse = await fetch(authUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ username, password })
+      });
+
+      if (!authResponse.ok) {
+        return new Response(JSON.stringify({ error: 'Autenticazione fallita su LibreBooking' }), {
+          status: 401,
+          headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json' }
+        });
+      }
+
+      const authData = await authResponse.json();
+      sessionToken = authData.sessionToken;
+      userId = authData.userId;
+
+      if (!sessionToken || !userId) {
+        return new Response(JSON.stringify({ error: 'Risposta di autenticazione non valida' }), {
+          status: 500,
+          headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json' }
+        });
+      }
+
+      shouldSetCookies = true;
+    } catch (err) {
+      return new Response(JSON.stringify({ error: 'Errore di connessione durante l\'autenticazione', details: err.message }), {
+        status: 500,
+        headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  // Esegue la chiamata per recuperare la lista delle prenotazioni
+  try {
+    const baseUrl = env.LIBREBOOKING_URL_RESERVATION || 'https://booked.sicil.eu/Web/Services/index.php/Reservations/';
+    //const reservationsUrl = `${baseUrl}?userId=${userId}`;
+    const reservationsUrl = `${baseUrl}`;
+    
+    const reservationsResponse = await fetch(reservationsUrl, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Booked-SessionToken': sessionToken,
+        'X-Booked-UserId': String(userId)
+      }
+    });
+
+    if (!reservationsResponse.ok) {
+      return new Response(JSON.stringify({ error: 'Impossibile recuperare le prenotazioni da LibreBooking' }), {
+        status: reservationsResponse.status,
+        headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json' }
+      });
+    }
+
+    const reservationsData = await reservationsResponse.json();
+
+    const responseHeaders = new Headers({
+      ...getCorsHeaders(request),
+      'Content-Type': 'application/json'
+    });
+
+    if (shouldSetCookies) {
+      const maxAge = 86400; // 24 ore
+      responseHeaders.append('Set-Cookie', `sessionToken=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`);
+      responseHeaders.append('Set-Cookie', `userId=${userId}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`);
+    }
+
+    return new Response(JSON.stringify(reservationsData), {
+      status: 200,
+      headers: responseHeaders
+    });
+
+  } catch (err) {
+    return new Response(JSON.stringify({ error: 'Errore durante il recupero delle prenotazioni', details: err.message }), {
+      status: 500,
+      headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+/**
+ * Restituisce gli header CORS dinamici basati sull'origine della richiesta
+ */
+function getCorsHeaders(request) {
+  const origin = request.headers.get('Origin') || '*';
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Booked-SessionToken, X-Booked-UserId',
+    'Access-Control-Allow-Credentials': 'true'
+  };
+}
+
+/**
+ * Funzione di utilità per il parsing dei cookie della richiesta
+ */
+function parseCookies(cookieHeader) {
+  const list = {};
+  cookieHeader.split(`;`).forEach(cookie => {
+    let [name, ...rest] = cookie.split(`=`).map(c => c.trim());
+    if (!name) return;
+    let value = rest.join(`=`);
+    if (!value) return;
+    list[name] = decodeURIComponent(value);
+  });
+  return list;
+}
