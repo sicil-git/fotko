@@ -1,1 +1,2 @@
-# fotko
+# FOTKO
+Proxy per Librebooking
